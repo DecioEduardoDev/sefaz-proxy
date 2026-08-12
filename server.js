@@ -1,46 +1,36 @@
+// server.js
 import express from "express";
 import https from "https";
+import fs from "fs";
+import crypto from "crypto";
 
 const app = express();
-app.use(express.json({ limit: "10mb" })); // Aumentado o limite de payload para suportar arquivos de certificado em Base64
+app.use(express.json());
+
+// Variáveis de ambiente no painel da Render/Railway:
+//   SEFAZ_CERT_BASE64  → certificado .pfx em Base64
+//   SEFAZ_CERT_PASSWORD → senha do .pfx
+//   WORKER_TOKEN       → token que você inventa (o app enviará este token)
 
 app.post("/sefaz/consulta", (req, res) => {
-  // 1. Validação do Token de Segurança da API
   const auth = req.headers["authorization"];
   if (auth !== `Bearer ${process.env.WORKER_TOKEN}`) {
-    return res.status(401).json({ erro: "Token invalido" });
+    return res.status(401).json({ erro: "Token inválido" });
   }
 
-  // 2. Extração dinâmica do certificado (Dinamico pelo Body OU Variável de Ambiente global)
-  const certBase64 = req.body.pfxBase64 || process.env.SEFAZ_CERT_BASE64;
-  const certPassword = req.body.pfxPassword || process.env.SEFAZ_CERT_PASSWORD;
+  // Reconstrói o .pfx a partir do Base64
+  const pfxBuffer = Buffer.from(process.env.SEFAZ_CERT_BASE64, "base64");
 
-  if (!certBase64) {
-    return res.status(400).json({ 
-      erro: "Nenhum certificado digital fornecido no corpo da requisicao (pfxBase64) ou no ambiente." 
-    });
-  }
-
-  // 3. Reconstrói o arquivo .pfx a partir do Base64
-  let pfxBuffer;
-  try {
-    pfxBuffer = Buffer.from(certBase64, "base64");
-  } catch (err) {
-    return res.status(400).json({ erro: "Falha ao decodificar o certificado Base64 fornecido." });
-  }
-
-  // 4. Monta a requisição com mTLS para a SEFAZ do CNPJ específico
+  // Monta a requisição SOAP para a SEFAZ com mTLS
   const options = {
-    hostname: req.body.hostname,
+    hostname: req.body.hostname,  // ex: "nfe-homologacao.sefazrs.rs.gov.br"
     port: 443,
     path: req.body.path,
     method: "POST",
     pfx: pfxBuffer,
-    passphrase: certPassword,
-    headers: {
-      "Content-Type": "application/soap+xml; charset=utf-8",
-      ...req.body.headers
-    }
+    passphrase: process.env.SEFAZ_CERT_PASSWORD,
+    headers: { "Content-Type": "application/soap+xml; charset=utf-8", ...req.body.headers },
+    body: req.body.soapEnvelope,
   };
 
   const sefazReq = https.request(options, (sefazRes) => {
@@ -50,9 +40,8 @@ app.post("/sefaz/consulta", (req, res) => {
   });
 
   sefazReq.on("error", (err) => res.status(502).json({ erro: err.message }));
-  sefazReq.write(req.body.soapEnvelope || "");
+  sefazReq.write(req.body.soapEnvelope);
   sefazReq.end();
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Proxy SEFAZ Multi-CNPJ rodando na porta ${PORT}`));
+app.listen(process.env.PORT || 3000);
